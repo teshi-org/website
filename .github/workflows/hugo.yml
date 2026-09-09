@@ -1,17 +1,20 @@
-# Builds the Hugo site and deploys static output to GitHub Pages.
-# In repo Settings → Pages: set Build and deployment → Source to "GitHub Actions".
-name: Deploy Hugo site to Pages
+# Build Hugo and the current GPUI WASM application, then deploy one Pages
+# artifact. The Teshi source is resolved to an immutable commit before it is
+# checked out; ordinary Teshi nightly packaging does not run this workflow.
+name: Deploy Hugo site and hosted Teshi UI
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      nightly_release_tag:
+        description: "Published Teshi nightly release tag to deploy"
+        required: true
+  repository_dispatch:
+    types:
+      - deploy-hosted-ui
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -21,51 +24,245 @@ defaults:
   run:
     shell: bash
 
+env:
+  TESHI_REPOSITORY: teshi-org/teshi
+  TESHI_TOOLCHAIN: nightly-2025-12-01
+  WASM_BINDGEN_VERSION: 0.2.126
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      teshi_sha: ${{ steps.resolve-nightly.outputs.sha }}
     env:
-      HUGO_VERSION: 0.144.0
+      NIGHTLY_RELEASE_TAG: ${{ github.event.inputs.nightly_release_tag || github.event.client_payload.nightly_release_tag }}
     steps:
+      - name: Checkout Hugo site
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify hosted UI workflow contract
+        run: python3 scripts/test-hosted-ui-workflow-contract.py
+
+      - name: Resolve published nightly identity
+        id: resolve-nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${NIGHTLY_RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}\.[0-9a-f]{7}$ ]]; then
+            echo "nightly_release_tag has an unexpected format" >&2
+            exit 1
+          fi
+          gh release view "${NIGHTLY_RELEASE_TAG}" --repo "${TESHI_REPOSITORY}" \
+            --json isDraft,isPrerelease > "${RUNNER_TEMP}/release.json"
+          gh release download "${NIGHTLY_RELEASE_TAG}" --repo "${TESHI_REPOSITORY}" \
+            --pattern update-manifest.json --dir "${RUNNER_TEMP}/nightly"
+          python3 - "${RUNNER_TEMP}/release.json" "${RUNNER_TEMP}/nightly/update-manifest.json" <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+          import sys
+
+          release = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          manifest = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          tag = os.environ["NIGHTLY_RELEASE_TAG"]
+          if release.get("isDraft") or not release.get("isPrerelease"):
+              raise SystemExit("nightly release must be published and marked prerelease")
+          identity = manifest.get("identity")
+          if not isinstance(identity, dict):
+              raise SystemExit("nightly update manifest is missing identity")
+          required = {"semver", "channel", "git_sha", "build_timestamp", "build_sequence"}
+          if set(identity) != required:
+              raise SystemExit("nightly identity fields do not match the required schema")
+          sha = identity["git_sha"]
+          sequence = identity["build_sequence"]
+          if identity["channel"] != "nightly":
+              raise SystemExit("release identity is not nightly")
+          if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+              raise SystemExit("release identity does not contain a full Git SHA")
+          if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence <= 0:
+              raise SystemExit("release identity build sequence must be a positive integer")
+          expected_prefix = f"v{identity['semver']}-nightly."
+          if not tag.startswith(expected_prefix) or not tag.endswith(f".{sha[:7]}"):
+              raise SystemExit("release tag and build identity disagree")
+          compact = json.dumps(identity, separators=(",", ":"), sort_keys=True)
+          output = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as fh:
+              fh.write(f"sha={sha}\n")
+              fh.write(f"minimum_cli={compact}\n")
+              fh.write(f"minimum_cli_build_sequence={sequence}\n")
+          print(f"Resolved published nightly {tag} to {sha} (sequence {sequence})")
+          PY
+
+      - name: Checkout Teshi source at resolved SHA
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TESHI_REPOSITORY }}
+          ref: ${{ steps.resolve-nightly.outputs.sha }}
+          path: teshi-source
+          fetch-depth: 1
+
       - name: Install Hugo CLI
+        env:
+          HUGO_VERSION: 0.144.0
         run: |
           wget -O "${RUNNER_TEMP}/hugo.deb" "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.deb"
           sudo dpkg -i "${RUNNER_TEMP}/hugo.deb"
 
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Install pinned Rust nightly and WASM target
+        uses: dtolnay/rust-toolchain@stable
         with:
-          submodules: recursive
+          toolchain: ${{ env.TESHI_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust and wasm-bindgen artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            teshi-source/target
+            ~/.cargo/bin/wasm-bindgen
+          key: ${{ runner.os }}-hosted-ui-${{ env.TESHI_TOOLCHAIN }}-${{ env.WASM_BINDGEN_VERSION }}-${{ hashFiles('teshi-source/Cargo.lock') }}
+
+      - name: Install pinned wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --locked --version "${WASM_BINDGEN_VERSION}"
 
       - name: Setup Pages
         id: pages
         uses: actions/configure-pages@v5
 
-      - name: Install Node.js dependencies
-        run: "[[ -f package-lock.json || -f npm-shrinkwrap.json ]] && npm ci || true"
-
-      - name: Build with Hugo
+      - name: Build and stage GPUI WASM under /app
         env:
-          HUGO_CACHEDIR: ${{ runner.temp }}/hugo_cache
-          HUGO_ENVIRONMENT: production
+          SOURCE_SHA: ${{ steps.resolve-nightly.outputs.sha }}
+          DEPLOYMENT_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          MINIMUM_CLI_JSON: ${{ steps.resolve-nightly.outputs.minimum_cli }}
+          MINIMUM_CLI_BUILD_SEQUENCE: ${{ steps.resolve-nightly.outputs.minimum_cli_build_sequence }}
+          TESHI_UI_SOURCE_SHA: ${{ steps.resolve-nightly.outputs.sha }}
+          TESHI_UI_MINIMUM_CLI_JSON: ${{ steps.resolve-nightly.outputs.minimum_cli }}
         run: |
-          hugo \
-            --gc \
-            --minify \
-            --baseURL "${{ steps.pages.outputs.base_url }}/"
+          set -euo pipefail
+          pushd teshi-source
+          cargo +"${TESHI_TOOLCHAIN}" build --release --target wasm32-unknown-unknown -p teshi-web
+          mkdir -p apps/teshi-web/dist/pkg
+          wasm-bindgen \
+            "target/wasm32-unknown-unknown/release/teshi_web.wasm" \
+            --target web \
+            --out-dir apps/teshi-web/dist/pkg
+          cp apps/teshi-web/web/index.html apps/teshi-web/dist/index.html
+          cp apps/teshi-web/web/main.js apps/teshi-web/dist/main.js
+          popd
 
-      - name: Upload artifact
+          # Build Hugo first, then add exactly the current UI bundle.
+          hugo --gc --minify --baseURL "${{ steps.pages.outputs.base_url }}/" \
+            --destination public
+          mkdir -p public/app
+          cp -R teshi-source/apps/teshi-web/dist/. public/app/
+
+          # Keep the Pages entrypoint and generated WASM glue cache-busted by
+          # the immutable source identity while retaining bindgen's relative
+          # asset layout.
+          python3 - <<'PY'
+          import os
+          import pathlib
+
+          root = pathlib.Path("public/app")
+          cache_key = os.environ["SOURCE_SHA"][:12]
+          replacements = {
+              'from "./pkg/teshi_web.js"': f'from "./pkg/teshi_web.js?v={cache_key}"',
+              'new URL("./pkg/teshi_web_bg.wasm", import.meta.url)': f'new URL("./pkg/teshi_web_bg.wasm?v={cache_key}", import.meta.url)',
+              'src="./main.js"': f'src="./main.js?v={cache_key}"',
+          }
+          main = (root / "main.js").read_text(encoding="utf-8")
+          for old, new in replacements.items():
+              main = main.replace(old, new)
+          (root / "main.js").write_text(main, encoding="utf-8")
+
+          bindgen = root / "pkg" / "teshi_web.js"
+          glue = bindgen.read_text(encoding="utf-8")
+          glue = glue.replace(
+              "new URL('teshi_web_bg.wasm', import.meta.url)",
+              f"new URL('teshi_web_bg.wasm?v={cache_key}', import.meta.url)",
+          )
+          bindgen.write_text(glue, encoding="utf-8")
+
+          index = root / "index.html"
+          html = index.read_text(encoding="utf-8")
+          html = html.replace('src="./main.js"', f'src="./main.js?v={cache_key}"')
+          index.write_text(html, encoding="utf-8")
+          PY
+
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          minimum_cli = json.loads(os.environ["MINIMUM_CLI_JSON"])
+          sequence = int(os.environ["MINIMUM_CLI_BUILD_SEQUENCE"])
+          if minimum_cli["build_sequence"] != sequence:
+              raise SystemExit("minimum CLI identity and sequence disagree")
+          manifest = {
+              "manifest_schema": 1,
+              "ui_source_sha": os.environ["SOURCE_SHA"],
+              "deployment_id": os.environ["DEPLOYMENT_ID"],
+              "minimum_cli": minimum_cli,
+              "minimum_build_sequence": sequence,
+              "control_protocol": 1,
+              "preview_protocol": 1,
+              "supported_channel": "nightly",
+              "nightly_upgrade_url": "https://github.com/teshi-org/teshi/releases",
+          }
+          path = pathlib.Path("public/app/ui-manifest.json")
+          path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          json.loads(path.read_text(encoding="utf-8"))
+          PY
+
+      - name: Run hosted UI smoke suite and validate security policy
+        env:
+          SOURCE_SHA: ${{ steps.resolve-nightly.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 teshi-source/scripts/test-hosted-ui-transport.py
+          python3 teshi-source/scripts/test-rest-preservation.py
+          test -s public/app/index.html
+          test -s public/app/main.js
+          test -s public/app/pkg/teshi_web.js
+          test -s public/app/pkg/teshi_web_bg.wasm
+          test -s public/app/ui-manifest.json
+          grep -a -F -q "${SOURCE_SHA}" public/app/pkg/teshi_web_bg.wasm
+          grep -a -F -q '"channel":"nightly"' public/app/pkg/teshi_web_bg.wasm
+          grep -q 'main.js?v=' public/app/index.html
+          grep -q 'teshi_web.js?v=' public/app/main.js
+          grep -q 'name="teshi-ui-runtime" content="gpui-wasm"' public/app/index.html
+          grep -q "Content-Security-Policy" public/app/index.html
+          grep -q 'no-referrer' public/app/index.html
+          if grep -R -E -q 'react-dom|__vite|teshi-web-ui' public/app; then
+            echo "unsupported React/Vite runtime marker found" >&2
+            exit 1
+          fi
+          if grep -R -E -q 'port=[^& ]*token=|X-Teshi-Token|/api/v1/' public/app; then
+            echo "hosted bundle contains a forbidden launch/auth/REST path marker" >&2
+            exit 1
+          fi
+
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./public
 
   deploy:
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - name: Deploy to GitHub Pages
+      - name: Deploy Pages artifact
         id: deployment
         uses: actions/deploy-pages@v5
