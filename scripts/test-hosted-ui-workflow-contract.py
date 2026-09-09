@@ -29,7 +29,7 @@ def main() -> int:
         "ref: ${{ steps.resolve-nightly.outputs.sha }}",
         "TESHI_UI_SOURCE_SHA:",
         "TESHI_UI_MINIMUM_CLI_JSON:",
-        "TESHI_TOOLCHAIN: nightly-2025-12-01",
+        "TESHI_TOOLCHAIN: nightly-2026-07-22",
         "WASM_BINDGEN_VERSION: 0.2.126",
         "wasm32-unknown-unknown",
         "actions/upload-pages-artifact@v3",

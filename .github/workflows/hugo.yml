@@ -26,7 +26,7 @@ defaults:
 
 env:
   TESHI_REPOSITORY: teshi-org/teshi
-  TESHI_TOOLCHAIN: nightly-2025-12-01
+  TESHI_TOOLCHAIN: nightly-2026-07-22
   WASM_BINDGEN_VERSION: 0.2.126
 
 jobs:
