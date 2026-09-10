@@ -129,7 +129,7 @@ jobs:
           key: ${{ runner.os }}-hosted-ui-${{ env.TESHI_TOOLCHAIN }}-${{ env.WASM_BINDGEN_VERSION }}-${{ hashFiles('teshi-source/Cargo.lock') }}
 
       - name: Install pinned wasm-bindgen CLI
-        run: cargo install wasm-bindgen-cli --locked --version "${WASM_BINDGEN_VERSION}"
+        run: cargo install wasm-bindgen-cli --locked --force --version "${WASM_BINDGEN_VERSION}"
 
       - name: Setup Pages
         id: pages
