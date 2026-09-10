@@ -32,6 +32,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
     outputs:
       teshi_sha: ${{ steps.resolve-nightly.outputs.sha }}
     env:
@@ -251,6 +254,14 @@ jobs:
             echo "hosted bundle contains a forbidden launch/auth/REST path marker" >&2
             exit 1
           fi
+
+      - name: Deploy Cloudflare Pages artifact
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy public --project-name=teshi --branch=main
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
