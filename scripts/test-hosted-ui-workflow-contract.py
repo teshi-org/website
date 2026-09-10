@@ -36,6 +36,7 @@ def main() -> int:
         "needs: build",
         "python3 teshi-source/scripts/test-hosted-ui-transport.py",
         "python3 teshi-source/scripts/test-rest-preservation.py",
+        "connect-src https://teshi.org https://teshi-org.github.io",
     ):
         require(marker, "hosted UI deployment safety gate")
     if "\n  push:" in WORKFLOW:

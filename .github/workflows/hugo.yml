@@ -175,6 +175,7 @@ jobs:
               'from "./pkg/teshi_web.js"': f'from "./pkg/teshi_web.js?v={cache_key}"',
               'new URL("./pkg/teshi_web_bg.wasm", import.meta.url)': f'new URL("./pkg/teshi_web_bg.wasm?v={cache_key}", import.meta.url)',
               'src="./main.js"': f'src="./main.js?v={cache_key}"',
+              'connect-src https://teshi.org ': 'connect-src https://teshi.org https://teshi-org.github.io ',
           }
           main = (root / "main.js").read_text(encoding="utf-8")
           for old, new in replacements.items():
@@ -236,6 +237,7 @@ jobs:
           grep -q 'main.js?v=' public/app/index.html
           grep -q 'teshi_web.js?v=' public/app/main.js
           grep -q 'name="teshi-ui-runtime" content="gpui-wasm"' public/app/index.html
+          grep -q 'connect-src https://teshi.org https://teshi-org.github.io' public/app/index.html
           grep -q "Content-Security-Policy" public/app/index.html
           grep -q 'no-referrer' public/app/index.html
           if grep -R -E -q 'react-dom|__vite|teshi-web-ui' public/app; then
