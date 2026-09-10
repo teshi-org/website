@@ -175,7 +175,6 @@ jobs:
               'from "./pkg/teshi_web.js"': f'from "./pkg/teshi_web.js?v={cache_key}"',
               'new URL("./pkg/teshi_web_bg.wasm", import.meta.url)': f'new URL("./pkg/teshi_web_bg.wasm?v={cache_key}", import.meta.url)',
               'src="./main.js"': f'src="./main.js?v={cache_key}"',
-              'connect-src https://teshi.org ': 'connect-src https://teshi.org https://teshi-org.github.io ',
           }
           main = (root / "main.js").read_text(encoding="utf-8")
           for old, new in replacements.items():
@@ -193,6 +192,10 @@ jobs:
           index = root / "index.html"
           html = index.read_text(encoding="utf-8")
           html = html.replace('src="./main.js"', f'src="./main.js?v={cache_key}"')
+          html = html.replace(
+              'connect-src https://teshi.org ',
+              'connect-src https://teshi.org https://teshi-org.github.io ',
+          )
           index.write_text(html, encoding="utf-8")
           PY
 
